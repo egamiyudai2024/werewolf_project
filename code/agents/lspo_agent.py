@@ -71,6 +71,56 @@ class LSPOAgent(BaseAgent):
         json_obj = self._extract_json(response_only)
         if json_obj: return json_obj
         return {}
+    
+    def _query_llm_batch(self, prompts, max_new_tokens=250, save_dir=None, filename_prefix=None):
+        """
+        複数のプロンプトをまとめてGPUで並列処理し、スループットを向上させる。
+        """
+        # 1. トークナイザ設定 (生成タスクでは左パディングが必須)
+        self.tokenizer.padding_side = "left"
+        if self.tokenizer.pad_token is None:
+            self.tokenizer.pad_token = self.tokenizer.eos_token
+
+        # 2. バッチトークン化 (padding=Trueで最長系列に合わせる)
+        inputs = self.tokenizer(prompts, return_tensors="pt", padding=True).to(self.llm.device)
+        
+        # 3. 生成実行
+        with torch.no_grad():
+            outputs = self.llm.generate(
+                **inputs,
+                max_new_tokens=max_new_tokens,
+                pad_token_id=self.tokenizer.pad_token_id,
+                do_sample=True,
+                temperature=0.9, # 多様性確保のための温度
+                top_p=0.9,
+                repetition_penalty=1.1
+            )
+        
+        results = []
+        # 4. 結果のデコードと抽出
+        for i, output in enumerate(outputs):
+            # プロンプト部分を除去して応答のみを取り出す
+            # (入力トークン長を使ってスライスするのが最も正確)
+            input_len = inputs.input_ids[i].shape[0]
+            generated_tokens = output[input_len:]
+            
+            response_text = self.tokenizer.decode(generated_tokens, skip_special_tokens=True)
+            
+            # JSON抽出
+            json_obj = self._extract_json(response_text)
+            results.append(json_obj)
+
+            # --- ログ保存 (デバッグ用) ---
+            if save_dir and filename_prefix:
+                try:
+                    log_path = os.path.join(save_dir, f"{filename_prefix}_{i}.txt")
+                    with open(log_path, "w", encoding="utf-8") as f:
+                        f.write(f"=== PROMPT {i} ===\n{prompts[i]}\n\n=== RESPONSE ===\n{response_text}\n")
+                except Exception:
+                    pass
+                
+        return results
+
 
     def _extract_json(self, text):
         # 既存のロジックを維持
@@ -107,63 +157,93 @@ class LSPOAgent(BaseAgent):
         if self.is_eval and self.my_cfr_net and phase in ["night", "day_voting"]:
             return self._get_action_via_cfr_direct(observation, phase, available_actions)
 
-        # 2. プロンプト生成 (学習時、または議論フェーズ用)
+        
+        # --------------------------------------------------------------------------------
+        # ▼▼▼ 2. ベースライン評価 (CFRなし) の場合の特別処理 ▼▼▼
+        # "ReAct" エージェントとして振る舞う: 戦略指示なしの単一プロンプトで最適解を生成させる
+        # --------------------------------------------------------------------------------
+        if self.is_eval and self.my_cfr_net is None:
+            # strategy_id=None を指定して、特定の戦略に偏らない純粋な推論を要求
+            instruction_prompt = get_action_prompt(observation, available_actions, strategy_id=None)
+            
+            # Villagerの夜フェーズなど、アクションが不要な場合
+            if instruction_prompt is None: 
+                 return {"phase": phase}
+
+            context_prompt = format_obs_to_prompt(observation)
+            #constraint_prompt = "\nIMPORTANT: Output ONLY the JSON object. Do not output any thinking process outside the JSON. Do not use Markdown code blocks.\nJSON:"
+            
+            full_prompt = context_prompt + "\n" + instruction_prompt #+ constraint_prompt
+            
+            # 単一クエリ実行
+            response_json = self._query_llm(full_prompt)
+            
+            # レスポンスが空の場合のフォールバック
+            if not response_json:
+                if phase == "day_discussion":
+                    return {"phase": phase, "statement": "I will pass my turn to think."}
+                return {"phase": phase} # 棄権
+
+            # 議論フェーズの場合はそのまま返す
+            if phase == "day_discussion":
+                return {
+                    "phase": phase,
+                    "statement": response_json.get("statement", "I will pass my turn to think."),
+                    "reasoning": response_json.get("reasoning", "")
+                }
+            # 夜・投票フェーズの場合はID解析して返す
+            else:
+                return self._parse_discrete_action(phase, response_json, available_actions)
+        
+
+        # 2. プロンプト生成とバッチ推論の準備
+        batch_prompts = []
+        
+        # 共通部分の作成
         context_prompt = format_obs_to_prompt(observation)
-        instruction_prompt = get_action_prompt(observation, available_actions)
-        if instruction_prompt is None: return {"phase": phase}
+        #constraint_prompt = "\nIMPORTANT: Output ONLY the JSON object. Do not output any thinking process outside the JSON. Do not use Markdown code blocks.\nJSON:"
 
-        constraint_prompt = "\nIMPORTANT: Output ONLY the JSON object. Do not output any thinking process outside the JSON. Do not use Markdown code blocks.\nJSON:"
-        full_prompt = context_prompt + "\n" + instruction_prompt + constraint_prompt
+        # A. バッチプロンプトの構築ループ
+        for i in range(candidate_actions_per_turn):
+            # 戦略IDを決定 (0: Aggressive, 1: Defensive, 2: Strategic)
+            # ループ回数に応じて循環させる
+            strategy_id = i % 3
+            
+            # data_utils に ID を渡して指示パートを取得
+            # (data_utils側で strategy_id に対応した戦略テキストが挿入される)
+            instruction_prompt = get_action_prompt(observation, available_actions, strategy_id=strategy_id)
+            
+            # Villagerの夜フェーズなど、アクションが不要な場合は None が返る
+            if instruction_prompt is None: 
+                 return {"phase": phase}
 
-        #生成されたプロンプトをファイルに保存
-        try:
-            timestamp = int(time.time())
-            log_filename = f"{self.log_dir}/prompt_p{self.player_id}_{phase}_{timestamp}.txt"
-            with open(log_filename, "w", encoding="utf-8") as f:
-                f.write(full_prompt)
-        except Exception as e:
-            print(f"[Warning] Failed to save prompt log: {e}")
-	
-	# ------------------------------------------------------------------
-        # 候補生成ループ (全フェーズ共通: 学習時はここで多様性を確保)
-        # ------------------------------------------------------------------
-        candidates = [] # テキストまたはJSONオブジェクトのリスト
+            # 完全なプロンプトを構築してリストに追加
+            full_prompt = context_prompt + "\n" + instruction_prompt #+ constraint_prompt
+            batch_prompts.append(full_prompt)
+
+        # B. バッチ推論の実行 (高速化)
+        timestamp = int(time.time())
+        round_num = observation.get('round', 0)
+        filename_prefix = f"{phase}_round{round_num}_p{self.player_id}_ts{timestamp}"
         
-        # 議論フェーズ用: 多様性を促すプロンプト
-        #diversity_prompt = '\nIn the action prompt: "consider a new action that is strategically different from existing ones."'
+        # ここで3つのプロンプトを並列に処理する
+        responses = self._query_llm_batch(
+            batch_prompts, 
+            save_dir=self.debug_log_dir, 
+            filename_prefix=filename_prefix
+        )
         
-        # 学習時は常に複数生成、評価時の議論フェーズも複数生成して選択
-        num_candidates = candidate_actions_per_turn
-        
-        # ただし、評価時の夜・投票は上でCFR Directに分岐しているのでここには来ない
-        
-        for i in range(num_candidates):
-            current_prompt = full_prompt
-            #if i > 0: current_prompt += diversity_prompt
-            
-            # --- [修正] 全フェーズで生の出力を保存 (debug_logs) ---
-            timestamp = int(time.time())
-            round_num = observation.get('round', 0)
-            # ファイル名に情報を詰め込む
-            log_filename = f"{phase}_round{round_num}_p{self.player_id}_cand{i}_{timestamp}.txt"
-            
-            response_json = self._query_llm(
-                current_prompt, 
-                save_dir=self.debug_log_dir, 
-                filename=log_filename
-            )
-            
-            #response_json = self._query_llm(current_prompt)
+        # C. 候補リストの構築
+        candidates = []
+        for response_json in responses:
             if not response_json: continue
-
-            # フェーズごとの候補抽出処理
+            
             if phase == "day_discussion":
                 val = response_json.get("statement", "I will pass my turn to think.")
                 candidates.append(val)
             elif phase in ["night", "day_voting"]:
-                # JSONオブジェクトごと保持し、後でアクション(数字)を抽出
                 candidates.append(response_json)
-
+        
         # 候補が一つも生成できなかった場合のフォールバック
         if not candidates:
             if phase == "day_discussion":
@@ -171,7 +251,7 @@ class LSPOAgent(BaseAgent):
             return {"phase": phase} # 棄権
 
         # ------------------------------------------------------------------
-        # 選択ロジック
+        # 選択ロジック (既存ロジック維持)
         # ------------------------------------------------------------------
 
         # === A. 議論フェーズ (Day Discussion) ===
@@ -181,6 +261,8 @@ class LSPOAgent(BaseAgent):
                 return self._select_discussion_via_cfr(observation, phase, candidates)
             
             # 2. 学習モード (ランダム選択)
+            # 生成された3つの戦略(Aggressive, Defensive, Strategic)から1つをランダムに選んで実行する
+            # これにより、自己対戦データに多様な戦略が蓄積される
             selected_statement = random.choice(candidates)
             selected_cluster_id = -1
             if self.my_kmeans:
@@ -202,6 +284,8 @@ class LSPOAgent(BaseAgent):
             # 学習時は生成された候補からランダムに選ぶことで探索を行う
             selected_json = random.choice(candidates)
             return self._parse_discrete_action(phase, selected_json, available_actions)
+
+            
 
     def _get_action_via_cfr_direct(self, observation, phase, available_actions):
         """

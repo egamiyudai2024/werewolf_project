@@ -208,6 +208,19 @@ def run_game_loop(agent_components, num_games, cfg, is_eval=False):
     game = WerewolfGame(num_players=cfg.NUM_PLAYERS, roles_config=cfg.ROLES)
     
     total_wins = {"werewolf": 0, "village": 0}
+
+
+    # 【修正】役職別の正解数と総数を管理する辞書
+    # キー: target_role (werewolf, seer, doctor, villager)
+    # 値: [correct_count, total_count]
+    role_prediction_stats = {
+        "werewolf": [0, 0],
+        "seer":     [0, 0],
+        "doctor":   [0, 0],
+        "villager": [0, 0]
+    }
+
+
     all_accuracies = []
     
     for _ in tqdm(range(num_games), desc="Playing Games"):
@@ -264,15 +277,29 @@ def run_game_loop(agent_components, num_games, cfg, is_eval=False):
                     obs = game.get_observation_for_player(player_id)
                     predictions = agent.predict_roles(obs)
 
-                    correct = 0
-                    total = 0
+
+                    # --- [修正後] (役職ごとの統計に加算) ---
                     for target_id, predicted_role in predictions.items():
+                        # 生きていて、自分以外で、正しい役職リストにある場合のみ評価
                         if target_id in true_roles and target_id in living_players and target_id != player_id:
-                            total += 1
-                            if true_roles[target_id] == predicted_role:
-                                correct += 1
-                    if total > 0:
-                        game_accuracies.append(correct / total)
+                            actual_role = true_roles[target_id]
+                            
+                            # 統計辞書に加算
+                            if actual_role in role_prediction_stats:
+                                role_prediction_stats[actual_role][1] += 1 # Total加算
+                                if actual_role == predicted_role:
+                                    role_prediction_stats[actual_role][0] += 1 # Correct加算
+
+
+                    #correct = 0
+                    #total = 0
+                    #for target_id, predicted_role in predictions.items():
+                    #    if target_id in true_roles and target_id in living_players and target_id != player_id:
+                    #        total += 1
+                    #        if true_roles[target_id] == predicted_role:
+                    #            correct += 1
+                    #if total > 0:
+                    #    game_accuracies.append(correct / total)
 
             # アクション実行
             actions_to_submit = {}
@@ -286,6 +313,20 @@ def run_game_loop(agent_components, num_games, cfg, is_eval=False):
                 
                 action = agent.get_action(obs, phase, avail_actions)
                 actions_to_submit[player_id] = action
+
+                # ▼▼▼ 2. CFR投票精度の測定 (投票実行時) ▼▼▼
+                # (戦略モデルとしての正しさを測る)
+                if phase == 'day_voting':
+                    my_role = true_roles[player_id]
+                    # 村人陣営のみ評価対象 (人狼を見つけられているか)
+                    if my_role != 'werewolf':
+                        vote_target = action_dict.get('vote')
+                        if vote_target is not None:
+                            # 投票先が人狼であれば正解 (1.0)、そうでなければ不正解 (0.0)
+                            if vote_target in werewolf_ids:
+                                game_cfr_acc.append(1.0)
+                            else:
+                                game_cfr_acc.append(0.0)
             
             game.step(actions_to_submit)
             
@@ -316,3 +357,22 @@ def print_results(results):
     print(f"  Win Rate (Werewolf Side): {ww_win_rate:.2f}% ({ww_wins}/{total})")
     print(f"  Win Rate (Village Side):  {v_win_rate:.2f}% ({v_wins}/{total})")
     print(f"  Prediction Accuracy:      {results['prediction_accuracy']:.2f}%")
+    # --- [修正後] (役職ごとの精度を表示) ---
+    print("  [LLM Role Prediction Accuracy]")
+    stats = results.get("role_prediction_stats", {})
+    all_correct = 0
+    all_total = 0
+    
+    for role in ["werewolf", "seer", "doctor", "villager"]:
+        if role in stats:
+            corr, tot = stats[role]
+            acc = (corr / tot * 100) if tot > 0 else 0.0
+            print(f"    - Target {role.capitalize()}: {acc:.2f}% ({corr}/{tot})")
+            all_correct += corr
+            all_total += tot
+            
+    overall_acc = (all_correct / all_total * 100) if all_total > 0 else 0.0
+    print(f"    - Overall:          {overall_acc:.2f}%")
+
+    print(f"  [Strategic Voting Accuracy]")
+    print(f"    - Villager Side vs Werewolf: {results['cfr_voting_accuracy']:.2f}%")

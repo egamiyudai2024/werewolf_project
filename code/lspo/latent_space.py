@@ -3,6 +3,7 @@ import os
 from tqdm import tqdm#時間のかかるループ処理の進捗状況をプログレスバーで表示し、視覚的に分かりやすく
 import numpy as np
 from sklearn.cluster import KMeans #k-meansクラスタリングを実行するためのクラス
+from sklearn.metrics import silhouette_score
 from game.environment import WerewolfGame
 from agents.lspo_agent import LSPOAgent
 import config
@@ -91,13 +92,99 @@ def generate_self_play_data(agent_class, agent_components, game_config, num_game
     print("Finished generating self-play data.")
     return all_discussion_data
 
-def construct_latent_space(discussion_data, role, num_clusters): #収集した発話をk-means方でクラスタリングすることで、潜在戦略空間に抽象化
-    all_utterances = [cand for item in discussion_data.get(role, []) for cand in item['candidates']]#roleをキーにして、itemの中にあるcandidatesを取り出して、一つずつcandに展開　→　例）seerの前候補発言を1つのリストにまとめた
-    embeddings = get_embeddings(all_utterances) #全ての発話テキストを数値ベクトルにエンコーディング
-    if not embeddings: return None #エラー処理
-    embeddings_np = np.array(embeddings) #データ数がクラスタ数より少ない場合はクラスタリングができないため、処理を中断
-        #get_embeddings が失敗した場合や、データ数がクラスタ数より少ない場合はクラスタリングができないため、処理を中断
-    if len(embeddings_np) < num_clusters: return None
-    kmeans = KMeans(n_clusters=num_clusters, random_state=config.SEED, n_init='auto') #k-meansモデルを初期化 クラスタ数k/乱数のシードを固定し、毎度同じ初期値でクラスタリングを開始/自動的に初期化回数を選ぶ
+# ▼▼▼ [追加] 最適なKを探すヘルパー関数 ▼▼▼
+def _find_optimal_k(embeddings_np, role_name):
+    """
+    シルエット分析を用いて、指定された範囲内で最適なクラスタ数Kを決定する。
+    """
+    min_k = config.MIN_CLUSTERS
+    max_k = config.MAX_CLUSTERS
+    n_samples = len(embeddings_np)
+
+    # 安全策: データ数が少なすぎる場合の処理
+    # データ数が min_k 未満なら、データ数そのものをKとする（全点をクラスタ化）
+    if n_samples < min_k:
+        print(f"[LatentSpace] Warning: Not enough data for {role_name} (n={n_samples}). Setting k={n_samples}.")
+        return max(1, n_samples)
+    
+    # 上限の調整: データ数以上のクラスタは作れない
+    effective_max_k = min(max_k, n_samples - 1)
+    if effective_max_k < min_k:
+        return min_k
+
+    best_k = min_k
+    best_score = -1.0
+    
+    print(f"[LatentSpace] Analyzing optimal K for role '{role_name}' (Range: {min_k}-{effective_max_k})...")
+
+    # 指定範囲で探索
+    for k in range(min_k, effective_max_k + 1):
+        try:
+            # 乱数シードを固定して再現性を確保
+            kmeans = KMeans(n_clusters=k, random_state=config.SEED, n_init='auto')
+            labels = kmeans.fit_predict(embeddings_np)
+            
+            # シルエット係数を計算 (-1 to 1, 1が良い)
+            # データ数が多すぎる(>10000)場合は計算コスト削減のためサンプリングしても良いが、
+            # 今回は「妥協なし」のため全データで計算する。
+            score = silhouette_score(embeddings_np, labels)
+            
+            # print(f"  K={k}: Silhouette Score = {score:.4f}") # 詳細デバッグ用
+            
+            if score > best_score:
+                best_score = score
+                best_k = k
+        except Exception as e:
+            print(f"  Warning: Clustering failed for K={k}: {e}")
+            continue
+
+    print(f"[LatentSpace] >> Selected Optimal K={best_k} (Score: {best_score:.4f}) for {role_name}")
+    return best_k
+
+def construct_latent_space(discussion_data, role, num_clusters=None):
+    """
+    収集した発話をK-Meansでクラスタリングし、潜在戦略空間を構築する。
+    num_clusters が None の場合、シルエット分析により自動決定する。
+    """
+    # 1. データの収集
+    all_utterances = [cand for item in discussion_data.get(role, []) for cand in item['candidates']]
+    
+    if not all_utterances:
+        print(f"[LatentSpace] No utterances found for role: {role}")
+        return None
+
+    # 2. Embeddingの取得
+    embeddings = get_embeddings(all_utterances) 
+    if not embeddings: 
+        return None 
+    
+    embeddings_np = np.array(embeddings)
+    
+    # 3. クラスタ数(K)の決定
+    if num_clusters is None:
+        # 自動決定ロジック (今回追加)
+        final_k = _find_optimal_k(embeddings_np, role)
+    else:
+        # 指定された場合 (従来のロジックや強制指定)
+        final_k = num_clusters
+        # データ数チェック
+        if len(embeddings_np) < final_k:
+            print(f"[LatentSpace] Warning: Data count ({len(embeddings_np)}) < Requested K ({final_k}).")
+            return None
+
+    # 4. 最終的なK-Meansモデルの作成
+    kmeans = KMeans(n_clusters=final_k, random_state=config.SEED, n_init='auto') 
     kmeans.fit(embeddings_np)
+    
     return kmeans
+    
+#def construct_latent_space(discussion_data, role, num_clusters=None): #収集した発話をk-means方でクラスタリングすることで、潜在戦略空間に抽象化
+#    all_utterances = [cand for item in discussion_data.get(role, []) for cand in item['candidates']]#roleをキーにして、itemの中にあるcandidatesを取り出して、一つずつcandに展開　→　例）seerの前候補発言を1つのリストにまとめた
+#    embeddings = get_embeddings(all_utterances) #全ての発話テキストを数値ベクトルにエンコーディング
+#    if not embeddings: return None #エラー処理
+#    embeddings_np = np.array(embeddings) #データ数がクラスタ数より少ない場合はクラスタリングができないため、処理を中断
+#        #get_embeddings が失敗した場合や、データ数がクラスタ数より少ない場合はクラスタリングができないため、処理を中断
+#    if len(embeddings_np) < num_clusters: return None
+#    kmeans = KMeans(n_clusters=num_clusters, random_state=config.SEED, n_init='auto') #k-meansモデルを初期化 クラスタ数k/乱数のシードを固定し、毎度同じ初期値でクラスタリングを開始/自動的に初期化回数を選ぶ
+#    kmeans.fit(embeddings_np)
+#    return kmeans

@@ -21,9 +21,18 @@ In the announcement phase, an announcement of last night's result is made to all
 In the discussion phase, the speaking order is randomized. The discussion consists of 2 rounds, so you will have the opportunity to speak twice to discuss who might be the Werewolves.
 In the voting phase, each player must votes for one player. The player with the most
 votes is eliminated and the game continues to the next night round.
-The Werewolves win the game if the number of remaining Werewolves is equal to the number of
+"IMPORTANT: The Werewolves win the game if the number of remaining Werewolves is equal to the number of
 remaining Seer, Doctor, and Villagers. The Seer, Doctor, and Villagers win the game if all Werewolves
 are eliminated."""
+
+# LSPOの探索空間を拡張するための3つの戦略指針
+STRATEGY_DEFINITIONS = {
+    0: "STRATEGY: Be AGGRESSIVE. Actively suspect others, lead the discussion, and accuse someone strongly based on the logs.",
+    1: "STRATEGY: Be DEFENSIVE and COOPERATIVE. Focus on establishing your own credibility and building trust with others.\n"
+        "Avoid making unnecessary enemies. Support logical opinions from others and prioritize the stability of the village discussion.",
+    2: "STRATEGY: Be STRATEGIC and TECHNICAL. Use game mechanics like Role Claim (CO) or bluffing. Look for logical contradictions. Play deceptively if you are a Werewolf."
+}
+
 
 def one_hot(index, size):
     vec = np.zeros(size)
@@ -44,13 +53,15 @@ def format_obs_to_vector(observation):
     player_id_vec = one_hot(observation.get('player_id'), NUM_PLAYERS)
     role_vec = one_hot(ROLES_MAP.get(observation.get('role')), NUM_ROLES)
     curr_round_val = observation.get('round', 1)  #追加分
-    current_round = np.array([observation.get('round', 1) - 1])
+    current_round = np.array([curr_round_val - 1])
     current_phase_vec = one_hot(PHASES_MAP.get(observation.get('phase')), NUM_PHASES)
     alive_players_vec = np.zeros(NUM_PLAYERS)
     for p_id in observation.get('alive_players', []):
         alive_players_vec[p_id] = 1
 
     MAX_ROUNDS = config.MAX_ROUNDS  # 例: 3
+
+    game_log = observation.get('game_log', [])
     
     # データを解析しやすい形に整理
     # 1. 自分の過去のアクション (action_historyから抽出)
@@ -65,7 +76,7 @@ def format_obs_to_vector(observation):
     votes_map = {}
     dead_map = {}
     
-    for log in observation.get('game_log', []):
+    for log in game_log:
         r = log.get('round')
         ltype = log.get('type')
         
@@ -129,16 +140,22 @@ def format_obs_to_vector(observation):
     
     # 3. 当日の議論 (environment.pyから渡された生ログを使用)
     # config.py の DISCUSSION_TURNS, EMBEDDING_DIM を使用
-    curr_logs = observation.get('current_discussion_logs', [])
+    #curr_logs = observation.get('current_discussion_logs', [])
+    curr_logs = [
+        log for log in game_log 
+        if log.get('round') == curr_round_val and log.get('type') == 'discussion'
+    ]
+
     discussion_vec = listener_instance.process_current_discussion(
         curr_logs, 
         num_players=NUM_PLAYERS, 
         max_turns=config.DISCUSSION_TURNS
     )
 
-    # 4. 過去の議論要約 (game_log全体を使用)
-    past_summary_vec = listener_instance.summarize_past_discussion(
-        observation.get('game_log', []), 
+    # 4. 過去の議論ベクトル化
+    # 過去の全ラウンドについて完全スロットを作成 (MAX_ROUNDS-1) * 896 次元
+    past_discussion_vec = listener_instance.summarize_past_discussion(
+        game_log, 
         curr_round_val
     )
 
@@ -149,10 +166,22 @@ def format_obs_to_vector(observation):
         current_round,
         current_phase_vec,
         alive_players_vec,
-        history_flat,     # (7+7+49) * 3 = 189
-        discussion_vec,   # 7 * 2 * 64 = 896
-        past_summary_vec  # 2 * 64 = 128
+        history_flat,     # 63×5=315
+        discussion_vec,   # 896
+        past_discussion_vec  
     ])
+
+    
+    
+    # 次元数チェックとログ出力
+    actual_dim = len(final_vector)
+    expected_dim = config.STATE_DIM
+    
+    if actual_dim != expected_dim:
+        raise ValueError(f"[FATAL ERROR] Vector dimension mismatch! Actual: {actual_dim}, Expected from Config: {expected_dim}")
+    
+    # デバッグ用: 初回または稀なタイミングで確認ログを出す（ここでは毎回出すと遅くなるため、エラー時以外はコメントアウト推奨だが、確認のため入れる）
+    # print(f"[DEBUG] Vector dim: {actual_dim} (OK)")
     
     return final_vector.astype(np.float32)
 
@@ -267,7 +296,7 @@ def format_obs_to_prompt(observation):
             if vote_details:
                 line = f"[Day {r} Voting Details]: {', '.join(vote_details)}\n"
             else:
-            continue 
+                continue 
         
         # 振り分けロジック
         if r < current_round:
@@ -316,7 +345,7 @@ def format_obs_to_prompt(observation):
     
     return prompt
 
-def get_action_prompt(observation, available_actions):
+def get_action_prompt(observation, available_actions, strategy_id=None):
     """
     論文 Appendix C.2, C.3, C.4 に基づくアクション選択プロンプトを生成します。
     Instruction Block の上書きバグを修正し、+= で結合するように変更しています。
@@ -417,12 +446,16 @@ def get_action_prompt(observation, available_actions):
                 "There is NO pre-game conversation (Day 0) in this game. "
                 "Therefore, there are NO past interactions regarding the player who died last night (whoever it may be).\n"
                 "Do NOT arbitrarily create imaginary stories or scenarios about past events to discuss.\n"
-                "Instead, discuss based ONLY on current facts (who was killed, who is alive) and future motives.\n"
+                "Instead, discuss based ONLY on current facts (who was killed, who is alive) and future motives.\n\n"
              )
         prompt += f"Now it is day {n_round} discussion phase and it is your turn to speak.\n"
         prompt += f"Before speaking to the other players, you should first reason the current situation only to yourself, and then speak to all other players.\n"
-        #JSON指定の直前に入れることで、出力形式を守らせつつ内容に多様性を持たせる
-        prompt += "Consider a new action that is strategically different from existing ones.\n"
+
+        # strategy_id が指定されている場合はその戦略を入れる
+        if strategy_id is not None and strategy_id in STRATEGY_DEFINITIONS:
+            # 指定された戦略を挿入
+            prompt += f"\n{STRATEGY_DEFINITIONS[strategy_id]}\n"
+        
         prompt += "You should only respond in JSON format as described below.\nResponse Format:\n"
         prompt += "{\n"
         prompt += '  "reasoning": "reason about the current situation only to yourself",\n'

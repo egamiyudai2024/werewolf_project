@@ -99,8 +99,16 @@ class LSPOTrainer:
             with open(data_filename, 'wb') as f: pickle.dump(discussion_data, f)#書き込み用にファイルを開く/データをそのまま保存/with...as...:によって、開いた後自動的に閉じる
             
             for role in self.config.ROLES:#役職ごとにループ処理開始
-                num_clusters = (self.config.INITIAL_K_WEREWOLF if role == "werewolf" else self.config.INITIAL_K_VILLAGE) + i#クラスタリングの数を決定
-                self.kmeans_models[role] = construct_latent_space(discussion_data, role, num_clusters)#生成した潜在戦略空間を役職ごとにクラスタリング
+                #num_clusters = (self.config.INITIAL_K_WEREWOLF if role == "werewolf" else self.config.INITIAL_K_VILLAGE) + i#クラスタリングの数を決定
+                #self.kmeans_models[role] = construct_latent_space(discussion_data, role, num_clusters)#生成した潜在戦略空間を役職ごとにクラスタリング
+                print(f"Constructing latent space for role: {role}...")
+                self.kmeans_models[role] = construct_latent_space(
+                    discussion_data, 
+                    role, 
+                    num_clusters=None  # Noneを渡して自動決定をトリガー
+                )
+        
+            
             print("Latent space constructed successfully.")
 
 

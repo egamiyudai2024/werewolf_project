@@ -77,7 +77,14 @@ class AbstractedWerewolfGame(WerewolfGame):
             # 各クラスタに属する発言をマッピング
             for i in range(kmeans.n_clusters):
                 cluster_utterances = [utt for utt, label in zip(all_utterances, labels) if label == i]
-                self.latent_map[role][i] = cluster_utterances
+                #self.latent_map[role][i] = cluster_utterances
+
+                # 代表発言の固定化
+                if cluster_utterances:
+                    # リスト全体を保存するのではなく、先頭の1つを「代表発言」として固定する。
+                    # これによりCFR探索中にテキストが揺らがなくなり、Embeddingキャッシュが100%ヒットする。
+                    representative_utterance = cluster_utterances[0]
+                    self.latent_map[role][i] = [representative_utterance]
     
     # （追加）状態の保存(get)と復元(set)メソッド
     
@@ -181,7 +188,8 @@ class AbstractedWerewolfGame(WerewolfGame):
             if self.phase == "day_discussion":
                 # クラスタIDに対応する発言リストを取得し、その中からランダムに1つ選ぶ
                 utterance_list = self.latent_map.get(player.role, {}).get(latent_id, ["Default statement."])
-                action_text = random.choice(utterance_list) if utterance_list else "Default statement."
+                #action_text = random.choice(utterance_list) if utterance_list else "Default statement."
+                action_text = utterance_list[0] if utterance_list else "Default statement."
                 full_actions[player_id] = {"statement": action_text}
             
             else:
@@ -192,20 +200,33 @@ class AbstractedWerewolfGame(WerewolfGame):
                  
                  # CFRが探索で選んだ target_id が、現在の有効なアクションに含まれているか確認
                  # (例: 死んだプレイヤーを選んでいないかチェック)
-                 if target_id in available_actions:
+
+                 if available_actions and target_id in available_actions:
                      chosen_action = target_id
                  else:
-                     # 無効なアクション（死んだ人への投票など）を選んだ場合のフォールバック
-                     # 学習を止めないため、ランダムに有効なアクションを選ぶ
-                     if available_actions:
-                         chosen_action = random.choice(available_actions)
-                     else:
-                         chosen_action = None
+                     chosen_action = None # 無効アクションは棄権扱い
 
                  if chosen_action is not None:
                      if self.phase == "night":
                          full_actions[player_id] = {"target": chosen_action}
                      elif self.phase == "day_voting":
                          full_actions[player_id] = {"vote": chosen_action}
+
+
+                 #if target_id in available_actions:
+                     #chosen_action = target_id
+                 #else:
+                     # 無効なアクション（死んだ人への投票など）を選んだ場合のフォールバック
+                     # 学習を止めないため、ランダムに有効なアクションを選ぶ
+                     #if available_actions:
+                         #chosen_action = random.choice(available_actions)
+                     #else:
+                         #chosen_action = None
+
+                 #if chosen_action is not None:
+                     #if self.phase == "night":
+                         #full_actions[player_id] = {"target": chosen_action}
+                     #elif self.phase == "day_voting":
+                         #full_actions[player_id] = {"vote": chosen_action}
                          
         return self.step(full_actions)

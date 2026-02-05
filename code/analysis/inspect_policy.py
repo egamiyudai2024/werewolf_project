@@ -174,9 +174,49 @@ for role in roles_to_inspect:
 
         # 4. ポリシー(確率)の計算
         regret_values = regret_values[:num_actions]
-        positive_regrets = np.maximum(regret_values, 0)
+        
+        # ▼▼▼ [修正] アクションマスクの適用 ▼▼▼
+        # policy_optimization.py と同じロジックを適用する
+        available_actions = game.get_available_actions(player_id)
+        
+        masked_regrets = np.full(num_actions, -1e9) # 初期値は負の無限大(選択不可)
+        
+        if game.phase == 'day_discussion':
+            # 議論フェーズは全ての潜在戦略が有効
+            masked_regrets = regret_values 
+        else:
+            # 夜・投票フェーズは有効なターゲットのみ許可
+            if available_actions:
+                for action in available_actions:
+                    if action < num_actions: # 安全策
+                        masked_regrets[action] = regret_values[action]
+            else:
+                pass # 有効アクションなし(パス)
+
+        # マスク適用後の値を使って確率計算
+        positive_regrets = np.maximum(masked_regrets, 0)
         regret_sum = np.sum(positive_regrets)
-        policy = (positive_regrets / regret_sum) if regret_sum > 0 else (np.ones(num_actions) / num_actions)
+        
+        policy = np.zeros(num_actions)
+        if regret_sum > 0:
+            policy = positive_regrets / regret_sum
+        else:
+            # Regretが全て負の場合、有効アクション内での一様分布にする
+            if game.phase != 'day_discussion' and available_actions:
+                valid_count = len([a for a in available_actions if a < num_actions])
+                if valid_count > 0:
+                    prob = 1.0 / valid_count
+                    for action in available_actions:
+                        if action < num_actions:
+                            policy[action] = prob
+            elif game.phase == 'day_discussion':
+                 policy = np.ones(num_actions) / num_actions
+
+
+
+        #positive_regrets = np.maximum(regret_values, 0)
+        #regret_sum = np.sum(positive_regrets)
+        #policy = (positive_regrets / regret_sum) if regret_sum > 0 else (np.ones(num_actions) / num_actions)
 
         # 5. 結果の表示 (上位3つの戦略のみ表示して見やすくする)
         available_actions = game.get_available_actions(player_id)

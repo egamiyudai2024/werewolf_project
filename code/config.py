@@ -81,16 +81,18 @@ ROLES = {
 NUM_ITERATIONS = 3 
 
 # --- Latent Space Construction Settings ---
-GAMES_PER_ITERATION_FOR_DATA = 50  # テスト実行用
-CANDIDATE_ACTIONS_PER_TURN = 2    # 高速化のため2推奨
-INITIAL_K_WEREWOLF = 3 
-INITIAL_K_VILLAGE = 2 
+GAMES_PER_ITERATION_FOR_DATA = 10  # テスト実行用
+CANDIDATE_ACTIONS_PER_TURN = 3    # 高速化のため2推奨
+#INITIAL_K_WEREWOLF = 3 
+#INITIAL_K_VILLAGE = 2 
+MIN_CLUSTERS = 3
+MAX_CLUSTERS = 7
 
 # --- Policy Optimization (Deep CFR) Settings ---
 # 【重要】高速化・最適化後の推奨値
-CFR_TRAIN_ITERATIONS = 1500  # Backtracking高速化済みなら50回で十分収束します
-CFR_BUFFER_SIZE = 100000     # メモリ圧迫を防ぐため1000程度
-CFR_BATCH_SIZE = 128
+CFR_TRAIN_ITERATIONS = 3000  # 理想は3000
+CFR_BUFFER_SIZE = 200000      # 理想は200000. 5000
+CFR_BATCH_SIZE = 512        #理想は512.   256
 CFR_LEARNING_RATE = 1e-3
 CFR_MAX_DEPTH = 5           # 深さ制限 (Rolloutへの切り替えライン)
 
@@ -99,12 +101,8 @@ CFR_MAX_DEPTH = 5           # 深さ制限 (Rolloutへの切り替えライン)
 CFR_HIDDEN_DIM = 2048
 
 
-
-
-
-
 # --- Game Logic Settings ---
-MAX_ROUNDS = 3           # 7人村ならDay 3で決着
+MAX_ROUNDS = 5           # 7人村ならDay 3で決着
 DISCUSSION_TURNS = 2     # 1日あたりの発言ターン数
 
 # --- Embedding Settings ---
@@ -120,20 +118,21 @@ dim_basic = 22
 #    - 全体: 63 * 3ラウンド = 189
 dim_history = 63 * MAX_ROUNDS
 
-# 3. Current Discussion Slots (当日の議論詳細)
-#    - 全員(7) * 2ターン * 64次元 = 896
-dim_discussion_current = 7 * DISCUSSION_TURNS * EMBEDDING_DIM
+# 3. Discussion Slots (議論ベクトル)
+# 1ラウンドあたりの次元数: 7人 * 2ターン * 64次元 = 896
+dim_discussion_per_round = 7 * DISCUSSION_TURNS * EMBEDDING_DIM
 
-# 4. Past Discussion Summary (過去の議論要約)
-#    - Day 1, Day 2 の要約 (Day 3の議論中まで使うため最大2つ)
-#    - 2日分 * 64次元 = 128
-dim_discussion_past = (MAX_ROUNDS - 1) * EMBEDDING_DIM
+# (A) Current Discussion Slots (当日の議論)
+dim_discussion_current = dim_discussion_per_round
+
+# (B) Past Discussion Slots (過去の議論)
+# 変更: 平均化せず、過去のラウンド数分だけフルのスロットを用意する
+# (5 - 1) * 896 = 3584 次元
+dim_discussion_past = (MAX_ROUNDS - 1) * dim_discussion_per_round
 
 # Total Dimension
+# 22 + 315 + 896 + 3584 = 4817 次元
 STATE_DIM = dim_basic + dim_history + dim_discussion_current + dim_discussion_past
-# 例: 22 + 189 + 896 + 128 = 1235
-
-
 
 #STATE_DIM = 85
 MAX_ACTION_DIM = {

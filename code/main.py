@@ -25,6 +25,15 @@ def main():
     # 評価時に特定のモデルディレクトリ（アーカイブなど）を指定するための引数
     parser.add_argument('--model_dir', type=str, default=None, help='Path to specific model directory for evaluation (e.g., models_archive/0122_1430). If None, uses default models/.')
 
+    # 対戦相手モデルのパスを指定する引数
+    parser.add_argument('--opponent_model', type=str, default=None, 
+                        help='HuggingFace model path for the opponent/baseline. If None, uses config.BASE_LLM_MODEL.')
+
+    # 【追加】対戦相手の評価のみを行い、LSPOエージェントの評価をスキップするフラグ
+    parser.add_argument('--only_opponent', action='store_true',
+                        help='If set, only evaluates the opponent model (Phase A) and skips LSPO agent evaluation (Phase B).')
+    
+
     #引数定義を追加
     parser.add_argument('--train_games', type=int, default=None, help='Override GAMES_PER_ITERATION_FOR_DATA')
     parser.add_argument('--candidates', type=int, default=None, help='Override CANDIDATE_ACTIONS_PER_TURN')

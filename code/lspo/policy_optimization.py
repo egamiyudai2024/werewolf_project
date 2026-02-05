@@ -156,6 +156,17 @@ class DeepCFRTrainer:
         state_vector = format_obs_to_vector(current_observation)
         num_actions = game_state.get_latent_action_space(role)
         
+        #追加：有効アクションの取得
+        valid_actions = []
+        if current_phase == "day_discussion":
+            # 議論フェーズは全てのクラスタIDが有効
+            valid_actions = list(range(num_actions))
+        else:
+            # 夜・投票フェーズは、ルール上選択可能なターゲットIDのみが有効
+            valid_actions = game_state.get_available_actions(cfr_player_idx)
+            # num_actionsの範囲外のアクションIDが含まれていないか念のためフィルタ
+            valid_actions = [a for a in valid_actions if a < num_actions]
+
         if num_actions == 0:
             snapshot = game_state.get_state()
             game_state.step({})
@@ -171,18 +182,57 @@ class DeepCFRTrainer:
             regret_values = self.role_models[role](state_tensor).cpu().numpy().flatten()
         
         regret_values = regret_values[:num_actions]
-        
-        positive_regrets = np.maximum(regret_values, 0)
+
+        # ▼▼▼ [修正] アクションマスクの適用 (無効なアクションのRegretを無効化) ▼▼▼
+        # valid_actions に含まれないインデックスの Regret を強制的に 0 (または負) にする
+        # これにより、positive_regrets 計算時に選ばれなくなる
+        masked_regrets = np.full(num_actions, -1e9) # 初期値はマイナス無限大(絶対選ばない)
+
+
+
+        if valid_actions:
+            for action in valid_actions:
+                masked_regrets[action] = regret_values[action]
+        else:
+            # 万が一有効アクションがない場合はパスするしかない（通常ここには来ない）
+            pass
+
+        # マスク適用後のRegretを使って確率計算
+        positive_regrets = np.maximum(masked_regrets, 0)
         regret_sum = np.sum(positive_regrets)
-        current_policy = (positive_regrets / regret_sum) if regret_sum > 0 else (np.ones(num_actions) / num_actions)
+        
+        current_policy = np.zeros(num_actions)
+        if regret_sum > 0:
+            current_policy = positive_regrets / regret_sum
+        else:
+            # Regretが全て負の場合、有効なアクションの中から一様ランダムに選ぶ (マスク付き一様分布)
+            if valid_actions:
+                prob = 1.0 / len(valid_actions)
+                for action in valid_actions:
+                    current_policy[action] = prob
+            else:
+                # どうしようもない場合
+                current_policy = np.ones(num_actions) / num_actions
+
+        
+        #positive_regrets = np.maximum(regret_values, 0)
+        #regret_sum = np.sum(positive_regrets)
+        #current_policy = (positive_regrets / regret_sum) if regret_sum > 0 else (np.ones(num_actions) / num_actions)
         
         child_node_utilities = np.zeros((num_actions, self.config.NUM_PLAYERS))
         node_utility = np.zeros(self.config.NUM_PLAYERS)
 
         # 状態のバックアップ (軽量スナップショット)
         snapshot = game_state.get_state()
+        
+        # ▼▼▼ [修正] ループ対象を valid_actions に限定し、計算効率化と安全性確保 ▼▼▼
+        # 全アクション(num_actions)を回す必要はない。有効なアクションの分岐だけ探索すれば良い。
+        # (無効アクションの確率は0なので、期待値計算には寄与しない)
+        explore_actions = valid_actions if valid_actions else range(num_actions)
 
-        for action in range(num_actions):
+
+        #for action in range(num_actions):
+        for action in explore_actions:
             # 自分(CFRプレイヤー)のアクション
             actions_for_phase = {cfr_player_idx: action}
             
@@ -194,29 +244,74 @@ class DeepCFRTrainer:
             for other_pid in other_acting_players:
                 other_role = game_state.players[other_pid].role
                 #other_role = hypothetical_game.players[other_pid].role
+                # ▼▼▼他プレイヤーの行動決定にもマスクを適用 ▼▼▼
+                other_valid_actions = []
+                other_num_actions = game_state.get_latent_action_space(other_role)
+                
+                if current_phase == "day_discussion":
+                    other_valid_actions = list(range(other_num_actions))
+                else:
+                    other_valid_actions = game_state.get_available_actions(other_pid)
+                    other_valid_actions = [a for a in other_valid_actions if a < other_num_actions]
+                
                 if self.role_models.get(other_role):
-                    other_num_actions = game_state.get_latent_action_space(other_role)
+                    #other_num_actions = game_state.get_latent_action_space(other_role)
                     #other_num_actions = hypothetical_game.get_latent_action_space(other_role)
-                    if other_num_actions > 0:
+                    if other_num_actions > 0 and other_valid_actions:
                         other_obs = game_state.get_observation_for_player(other_pid)
                         #other_obs = hypothetical_game.get_observation_for_player(other_pid)
                         other_sv = format_obs_to_vector(other_obs)
                         other_st = torch.from_numpy(other_sv).float().to(self.device).unsqueeze(0)
+                        
                         with torch.no_grad():
                             other_rv = self.role_models[other_role](other_st).cpu().numpy().flatten()
                         other_rv = other_rv[:other_num_actions]
-                        other_pr = np.maximum(other_rv, 0)
+
+
+                        #マスク適用
+                        other_masked_rv = np.full(other_num_actions, -1e9)
+                        for oa in other_valid_actions:
+                            other_masked_rv[oa] = other_rv[oa]
+
+                        other_pr = np.maximum(other_masked_rv, 0)
                         other_rs = np.sum(other_pr)
-                        other_policy = (other_pr / other_rs) if other_rs > 0 else (np.ones(other_num_actions) / other_num_actions)
+                        
+                        other_policy = np.zeros(other_num_actions)
+                        if other_rs > 0:
+                            other_policy = other_pr / other_rs
+                        else:
+                            prob = 1.0 / len(other_valid_actions)
+                            for oa in other_valid_actions:
+                                other_policy[oa] = prob
+                        
                         other_action = np.random.choice(len(other_policy), p=other_policy)
                         actions_for_phase[other_pid] = other_action
                     else:
-                        actions_for_phase[other_pid] = 0
+                        actions_for_phase[other_pid] = 0 # Fallback
                 else:
-                    other_num_actions = game_state.get_latent_action_space(other_role)
+                    # ランダムプレイヤーの場合も有効アクションから選ぶ
+                    if other_num_actions > 0 and other_valid_actions:
+                        actions_for_phase[other_pid] = random.choice(other_valid_actions)
+                    else:
+                        actions_for_phase[other_pid] = 0
+
+
+
+
+
+
+#                        other_pr = np.maximum(other_rv, 0)
+#                        other_rs = np.sum(other_pr)
+#                        other_policy = (other_pr / other_rs) if other_rs > 0 else (np.ones(other_num_actions) / other_num_actions)
+#                        other_action = np.random.choice(len(other_policy), p=other_policy)
+#                        actions_for_phase[other_pid] = other_action
+#                    else:
+#                        actions_for_phase[other_pid] = 0
+#                else:
+#                    other_num_actions = game_state.get_latent_action_space(other_role)
                     #other_num_actions = hypothetical_game.get_latent_action_space(other_role)
-                    if other_num_actions > 0:
-                        actions_for_phase[other_pid] = random.randrange(other_num_actions)
+#                    if other_num_actions > 0:
+#                        actions_for_phase[other_pid] = random.randrange(other_num_actions)
 
             #hypothetical_game.step_with_latent_actions(actions_for_phase)
             # 1. ゲーム進行 (In-place) - game_state を直接進める
