@@ -8,7 +8,7 @@ import sys
 
 def main():
     parser = argparse.ArgumentParser(description="LSPO for Werewolf Game")
-    parser.add_argument('--mode', type=str, default='train', choices=['train', 'evaluate'],
+    parser.add_argument('--mode', type=str, default='train', choices=['train', 'evaluate', 'competition'],
                         help='Mode to run the script in.')
 
     # --- 評価用の引数を追加 ---
@@ -25,24 +25,32 @@ def main():
     # 評価時に特定のモデルディレクトリ（アーカイブなど）を指定するための引数
     parser.add_argument('--model_dir', type=str, default=None, help='Path to specific model directory for evaluation (e.g., models_archive/0122_1430). If None, uses default models/.')
 
-    # 対戦相手モデルのパスを指定する引数
+    # 【追加】対戦相手モデルのパスを指定する引数
     parser.add_argument('--opponent_model', type=str, default=None, 
-                        help='HuggingFace model path for the opponent/baseline. If None, uses config.BASE_LLM_MODEL.')
+                        help='HuggingFace model path for the opponent/baseline (e.g., "deepseek-ai/DeepSeek-R1-Distill-Qwen-32B"). If None, uses config.BASE_LLM_MODEL.')
 
     # 【追加】対戦相手の評価のみを行い、LSPOエージェントの評価をスキップするフラグ
     parser.add_argument('--only_opponent', action='store_true',
                         help='If set, only evaluates the opponent model (Phase A) and skips LSPO agent evaluation (Phase B).')
-    
-
+                        
     #引数定義を追加
     parser.add_argument('--train_games', type=int, default=None, help='Override GAMES_PER_ITERATION_FOR_DATA')
     parser.add_argument('--candidates', type=int, default=None, help='Override CANDIDATE_ACTIONS_PER_TURN')
     parser.add_argument('--cfr_iter', type=int, default=None, help='Override CFR_TRAIN_ITERATIONS')
     parser.add_argument('--dpo_epochs', type=int, default=None, help='Override DPO_EPOCHS')
 
+    # 対戦用: モデル1 (人狼側初期想定) と モデル2 (村人側初期想定)
+    parser.add_argument('--model1_type', type=str, default='base', choices=['base', 'lspo', 'deepseek'])
+    parser.add_argument('--model2_type', type=str, default='lspo', choices=['base', 'lspo', 'deepseek'])
+    parser.add_argument('--model1_iter', type=int, default=0)
+    parser.add_argument('--model2_iter', type=int, default=3)
+
+
     args = parser.parse_args() #実際にコマンドラインから与えられた因数を解析
 
-    os.environ["CUDA_VISIBLE_DEVICES"] = str(args.gpu_id)
+    
+    #一旦削除
+    #os.environ["CUDA_VISIBLE_DEVICES"] = str(args.gpu_id)
 
     # 引数が指定されていれば、config.py の値を上書きする
     if args.train_games is not None:
@@ -60,6 +68,8 @@ def main():
     if args.dpo_epochs is not None:
         config.DPO_EPOCHS = args.dpo_epochs
         print(f"[Override] DPO_EPOCHS set to {config.DPO_EPOCHS}")
+
+    
 
     if args.mode == 'train':
         #print("Starting LSPO training process...")
@@ -81,9 +91,22 @@ def main():
             baseline_iteration=args.baseline_iter,
             num_games=args.num_games,
             cfg=config,
-            model_dir=args.model_dir
+            model_dir=args.model_dir,
+            opponent_model_path=args.opponent_model,  # 引数を渡す
+            only_opponent=args.only_opponent  # 【追加】フラグを渡す
         )
         print("Evaluation finished.")
+        
+    elif args.mode == 'competition':
+        # 新しい対戦用関数を呼び出す
+        from evaluation_h2h import run_competition
+        run_competition(
+            model1_spec={'type': args.model1_type, 'iter': args.model1_iter},
+            model2_spec={'type': args.model2_type, 'iter': args.model2_iter},
+            num_games=args.num_games,
+            cfg=config,
+            model_dir=args.model_dir
+        )
 
 
 if __name__ == "__main__":

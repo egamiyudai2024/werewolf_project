@@ -345,7 +345,7 @@ def format_obs_to_prompt(observation):
     
     return prompt
 
-def get_action_prompt(observation, available_actions, strategy_id=None):
+def get_action_prompt(observation, available_actions, strategy_id=None, is_deepseek=False):
     """
     論文 Appendix C.2, C.3, C.4 に基づくアクション選択プロンプトを生成します。
     Instruction Block の上書きバグを修正し、+= で結合するように変更しています。
@@ -429,12 +429,22 @@ def get_action_prompt(observation, available_actions, strategy_id=None):
         prompt += f"you should first reason about the current situation, then choose from the following actions: {actions_str}\n"
         if role == "seer" and (known_whites or known_blacks):
                 prompt += f"\n[MEMORY] You have already investigated players: {investigated_history}. Do not investigate them again.\n"
-        prompt += "You should only respond in JSON format as described below.\nResponse Format:\n"
+        # ▼▼▼ モデルに応じた制約メッセージの定義 ▼▼▼
+        if is_deepseek:
+            # DeepSeek用: 思考暴走を抑える強い制約
+            prompt+="You should only respond in JSON format as described below.\n"
+            prompt+="IMPORTANT: Keep the 'reasoning' field CONCISE and SHORT (less than 50 words). "
+            prompt+="Do not explain your entire thought process inside the JSON.\n"
+            prompt+="Response Format:\n"
+        else:
+            # 通常用 (Llama, Qwenなど): 標準的な制約
+            prompt+="You should only respond in JSON format as described below.\n"
+            prompt+="Response Format:\n"
         prompt += "{\n"
         prompt += '  "reasoning": "reason about the current situation",\n'
         prompt += f'  "action": "{action_verb} player_i"\n'
         prompt += "}\n"
-        prompt += "Ensure the response can be parsed by Python json.loads"
+        prompt += "Ensure the response can be parsed by Python json.loads. Do not write any code or explanations outside the JSON. Do not use Markdown code blocks.\nJSON:"
 
     # --- C.3 Prompt for Discussion Actions (Day) ---
     elif phase == "day_discussion":
@@ -456,12 +466,22 @@ def get_action_prompt(observation, available_actions, strategy_id=None):
             # 指定された戦略を挿入
             prompt += f"\n{STRATEGY_DEFINITIONS[strategy_id]}\n"
         
-        prompt += "You should only respond in JSON format as described below.\nResponse Format:\n"
+        # ▼▼▼ モデルに応じた制約メッセージの定義 ▼▼▼
+        if is_deepseek:
+            # DeepSeek用: 思考暴走を抑える強い制約
+            prompt+="You should only respond in JSON format as described below.\n"
+            prompt+="IMPORTANT: Keep the 'reasoning' field CONCISE and SHORT (less than 50 words). "
+            prompt+="Do not explain your entire thought process inside the JSON.\n"
+            prompt+="Response Format:\n"
+        else:
+            # 通常用 (Llama, Qwenなど): 標準的な制約
+            prompt+="You should only respond in JSON format as described below.\n"
+            prompt+="Response Format:\n"
         prompt += "{\n"
         prompt += '  "reasoning": "reason about the current situation only to yourself",\n'
         prompt += '  "statement": "speak to all other players"\n'
         prompt += "}\n"
-        prompt += "Ensure the response can be parsed by Python json.loads"
+        prompt += "Ensure the response can be parsed by Python json.loads. Do not write any code or explanations outside the JSON. Do not use Markdown code blocks.\nJSON:"
 
     # --- C.4 Prompt for Voting Actions (Day) ---
     elif phase == "day_voting":
@@ -471,11 +491,21 @@ def get_action_prompt(observation, available_actions, strategy_id=None):
         prompt += instruction_block
         prompt += f"Now it is day {n_round} voting phase, you must vote for one player to {objective}.\n"
         prompt += f"You should first reason about the current situation, and then choose from the following actions: {actions_str}\n"
-        prompt += "You should only respond in JSON format as described below.\nResponse Format:\n"
+        # ▼▼▼ モデルに応じた制約メッセージの定義 ▼▼▼
+        if is_deepseek:
+            # DeepSeek用: 思考暴走を抑える強い制約
+            prompt+="You should only respond in JSON format as described below.\n"
+            prompt+="IMPORTANT: Keep the 'reasoning' field CONCISE and SHORT (less than 50 words). "
+            prompt+="Do not explain your entire thought process inside the JSON.\n"
+            prompt+="Response Format:\n"
+        else:
+            # 通常用 (Llama, Qwenなど): 標準的な制約
+            prompt+="You should only respond in JSON format as described below.\n"
+            prompt+="Response Format:\n"
         prompt += "{\n"
         prompt += '  "reasoning": "reason about the current situation",\n'
         prompt += '  "action": "vote for player_i"\n'
         prompt += "}\n"
-        prompt += "Ensure the response can be parsed by Python json.loads. Do not write any code or explanations outside the JSON."
+        prompt += "Ensure the response can be parsed by Python json.loads. Do not write any code or explanations outside the JSON. Do not use Markdown code blocks.\nJSON:"
 
     return prompt

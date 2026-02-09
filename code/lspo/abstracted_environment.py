@@ -210,7 +210,9 @@ class AbstractedWerewolfGame(WerewolfGame):
                      if self.phase == "night":
                          full_actions[player_id] = {"target": chosen_action}
                      elif self.phase == "day_voting":
-                         full_actions[player_id] = {"vote": chosen_action}
+                         full_actions[player_id] = {"target": chosen_action}
+
+        return self.step(full_actions)
 
 
                  #if target_id in available_actions:
@@ -229,4 +231,4 @@ class AbstractedWerewolfGame(WerewolfGame):
                      #elif self.phase == "day_voting":
                          #full_actions[player_id] = {"vote": chosen_action}
                          
-        return self.step(full_actions)
+        #return self.step(full_actions)

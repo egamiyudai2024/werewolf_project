@@ -16,8 +16,10 @@ class LSPOAgent(BaseAgent):
         self.llm = agent_components['llm']
         self.tokenizer = agent_components['tokenizer']
         self.device = agent_components['device']
-        
         self.is_eval = is_eval
+        #予測ログ専用ディレクトリ
+        self.predict_log_dir = "debug_predict"
+        os.makedirs(self.predict_log_dir, exist_ok=True)
         
         # CFRネットワーク
         all_cfr_nets = agent_components.get('cfr_net', {})
@@ -152,49 +154,17 @@ class LSPOAgent(BaseAgent):
         except: pass
         return None
 
-    def get_action(self, observation, phase, available_actions, candidate_actions_per_turn=3):
+    def get_action(self, observation, phase, available_actions, candidate_actions_per_turn=None):
         # 1. 評価モードかつCFRがある場合、夜・投票はCFRのみで決定 (LLM不使用)
-        if self.is_eval and self.my_cfr_net and phase in ["night", "day_voting"]:
-            return self._get_action_via_cfr_direct(observation, phase, available_actions)
+        #if self.is_eval and self.my_cfr_net and phase in ["night", "day_voting"]:
+        #    return self._get_action_via_cfr_direct(observation, phase, available_actions)
 
-        
-        # --------------------------------------------------------------------------------
-        # ▼▼▼ 2. ベースライン評価 (CFRなし) の場合の特別処理 ▼▼▼
-        # "ReAct" エージェントとして振る舞う: 戦略指示なしの単一プロンプトで最適解を生成させる
-        # --------------------------------------------------------------------------------
-        if self.is_eval and self.my_cfr_net is None:
-            # strategy_id=None を指定して、特定の戦略に偏らない純粋な推論を要求
-            instruction_prompt = get_action_prompt(observation, available_actions, strategy_id=None)
-            
-            # Villagerの夜フェーズなど、アクションが不要な場合
-            if instruction_prompt is None: 
-                 return {"phase": phase}
-
-            context_prompt = format_obs_to_prompt(observation)
-            #constraint_prompt = "\nIMPORTANT: Output ONLY the JSON object. Do not output any thinking process outside the JSON. Do not use Markdown code blocks.\nJSON:"
-            
-            full_prompt = context_prompt + "\n" + instruction_prompt #+ constraint_prompt
-            
-            # 単一クエリ実行
-            response_json = self._query_llm(full_prompt)
-            
-            # レスポンスが空の場合のフォールバック
-            if not response_json:
-                if phase == "day_discussion":
-                    return {"phase": phase, "statement": "I will pass my turn to think."}
-                return {"phase": phase} # 棄権
-
-            # 議論フェーズの場合はそのまま返す
-            if phase == "day_discussion":
-                return {
-                    "phase": phase,
-                    "statement": response_json.get("statement", "I will pass my turn to think."),
-                    "reasoning": response_json.get("reasoning", "")
-                }
-            # 夜・投票フェーズの場合はID解析して返す
-            else:
-                return self._parse_discrete_action(phase, response_json, available_actions)
-        
+        # 1. 評価モードの際、LLMのみ、かつループ回数1回で自己対戦を行う
+        if self.is_eval: #and self.my_cfr_net and phase in ["night", "day_voting"]:
+            candidate_actions_per_turn = 1
+            #print("[Eval Mode] Setting candidate_actions_per_turn to 1 for evaluation.")
+        elif candidate_actions_per_turn is None:
+            candidate_actions_per_turn = 3  # デフォルトは3候補生成
 
         # 2. プロンプト生成とバッチ推論の準備
         batch_prompts = []
@@ -206,9 +176,13 @@ class LSPOAgent(BaseAgent):
         # A. バッチプロンプトの構築ループ
         for i in range(candidate_actions_per_turn):
             # 戦略IDを決定 (0: Aggressive, 1: Defensive, 2: Strategic)
+
             # ループ回数に応じて循環させる
             strategy_id = i % 3
-            
+            if self.is_eval: #評価時は戦略としてNoneを返す
+                strategy_id = None
+                #print("[Eval Mode] Using strategy_id = None for evaluation.")
+
             # data_utils に ID を渡して指示パートを取得
             # (data_utils側で strategy_id に対応した戦略テキストが挿入される)
             instruction_prompt = get_action_prompt(observation, available_actions, strategy_id=strategy_id)
@@ -307,7 +281,7 @@ class LSPOAgent(BaseAgent):
             
             # もし有効なアクションがなければ棄権
             if not valid_actions:
-                return {"phase": phase}
+                return {"phase": phase, "target": None}
 
             for action_idx in valid_actions:
                 # ネットワークの出力次元範囲内かチェック
@@ -319,16 +293,16 @@ class LSPOAgent(BaseAgent):
             
             # 何も選べなかった場合 (範囲外など) はランダムフォールバック
             if best_action is None:
-                best_action = random.choice(valid_actions)
+                best_action = None #random.choice(valid_actions)
                 
             if phase == "night":
                 return {"phase": phase, "target": best_action}
             elif phase == "day_voting":
-                return {"phase": phase, "vote": best_action}
+                return {"phase": phase, "target": best_action}
                 
         except Exception as e:
             print(f"Error in CFR direct selection: {e}")
-            return {"phase": phase} # エラー時は棄権
+            return {"phase": phase,  "target": phase} # エラー時は棄権
 
     def _select_discussion_via_cfr(self, observation, phase, candidates):
         """
@@ -407,16 +381,70 @@ class LSPOAgent(BaseAgent):
         if phase == "night":
             return {"phase": phase, "target": chosen_action}
         elif phase == "day_voting":
-            return {"phase": phase, "vote": chosen_action}
-        return {}
+            return {"phase": phase, "target": chosen_action}
+        return {"phase": phase, "target": None}
 
-    def predict_roles(self, observation):
+    def predict_roles(self, observation, game_idx=0):
         # 既存コードと同じ
         prompt = format_obs_to_prompt(observation)
-        prompt += "\nBased on the game history, predict the roles of all other players.\n"
-        prompt += "Response JSON format: {\"player_id\": \"role\", ...}\n"
+                # 2. 情報抽出
+        my_role = self.role
+        my_id = self.player_id
+        teammates = observation.get("teammates", [])
+
+        prompt = prompt.replace("--> IT IS VOTING TIME. MAKE YOUR DECISION.", "")
+        prompt += "\n[TASK]\nBased on the game history, predict the roles of all other players.\n"
+        prompt += "\n[CONSTRAINTS]\n1. Use ONLY these four labels: 'werewolf', 'seer', 'doctor', 'villager'.\n"
+        prompt += "2. Do NOT use 'unknown', 'dead', or multiple roles (e.g., 'villager or doctor').\n"
+        prompt += "3. You must ssign exactly one role per player, ensuring the total count matches the game setup (2 Werewolves, 1 Seer, 1 Doctor, 3 Villagers).\n"
+        # 要件3: 役職内訳の提示
+        prompt += "\n[GAME SETUP] \nThere are 7 players total. The role distribution is:\n"
+        prompt += "Total: 7 players. (2 Werewolves, 1 Seer, 1 Doctor, 3 Villagers)\n"
+
+        # 要件2: 自己認識とチームメイトの提示 (Recency Bias対策)
+        prompt += f"\n[IMPORTANT REMINDER]\n"
+        prompt += f"You are player_{my_id}.\n"
+        prompt += f"Your Role: {my_role.capitalize()}\n"
+
+
+                # 人狼の場合、チームメイト情報を「予測のヒント」として再度強調する
+        if self.role == "werewolf" and "teammates" in observation:
+            teammates = observation["teammates"]
+            if teammates:
+                teammates_str = ", ".join([f"player_{t}" for t in teammates])
+                # 「あなたはこれらを知っている」と明示する
+                prompt += f"IMPORTANT HINT: You KNOW that {teammates_str} is your Werewolf teammate. Mark them as 'werewolf'.\n"
+                prompt += "Use this knowledge to deduce who the Seer, Doctor and villager are among the remaining players.\n"
+        prompt += "Response JSON format:\n"
+        prompt += "{\n"
+        prompt += '  "reasoning": "Analyze your previous actions and the players\' claims, voting patterns, and contradictions step-by-step.",\n'
+        prompt += '  "player_0": "role_label",\n'
+        prompt += '  "player_1": "role_label",\n'
+        prompt += '  "player_2": "role_label",\n'
+        prompt += '  "player_3": "role_label",\n'
+        prompt += '  "player_4": "role_label",\n'
+        prompt += '  "player_5": "role_label",\n'
+        prompt += '  "player_6": "role_label"\n'
+        prompt += "}\n"
         
-        response_json = self._query_llm(prompt, max_new_tokens=200)
+        response_json = self._query_llm(prompt, max_new_tokens=500)
+
+        # ### MODIFIED ###: ログ保存
+        # LSPOAgentの _query_llm は内部で既にログ保存機能を持つ場合がありますが、
+        # 予測専用ディレクトリに、より詳細な情報を保存します。
+        timestamp = int(time.time())
+        round_num = observation.get('round', 0)
+        
+        filename = f"pred_LSPO_G{game_idx}_R{round_num}_p{self.player_id}_ts{timestamp}.txt"
+        log_path = os.path.join(self.predict_log_dir, filename)
+        
+        with open(log_path, "w", encoding="utf-8") as f:
+            f.write(f"=== LSPO ROLE PREDICTION LOG ===\n")
+            f.write(f"Game: {game_idx} | Round: {round_num} | Player: {self.player_id}\n\n")
+            f.write(f"--- PROMPT ---\n{prompt}\n\n")
+            f.write(f"--- EXTRACTED JSON ---\n{json.dumps(response_json, indent=2, ensure_ascii=False)}\n")
+
+
         predictions = {}
         valid_roles = {'werewolf', 'seer', 'doctor', 'villager'}
         

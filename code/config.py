@@ -20,13 +20,14 @@ if CURRENT_USER == "ku50002337":
 elif CURRENT_USER == "yudai2024":
     # --- [Shrike (Lab Server)] ---
     print("Config: Detected SHRIKE environment.")
-    # 指定されたディレクトリ構造 (/v2lspo/...)
-    ROOT_DIR = "/home/yudai2024/v2lspo/werewolf_project"
+    # 指定されたディレクトリ構造
+    ROOT_DIR = "/home/yudai2024/werewolf_project"
     
-    # Shrikeの場合、「以下玄界と同じ」であればモデルも配置されている可能性がありますが、
+    # Shrikeの場合
     # 万が一同期されていない場合は HuggingFace Hub からダウンロードするようにフォールバックを設定
     local_model_path = os.path.join(ROOT_DIR, "pretrained_models", "Qwen2.5-32B-Instruct")
     if os.path.exists(local_model_path):
+        print(f"Using local model path: {local_model_path}")
         BASE_LLM_MODEL = local_model_path
     else:
         # ローカルになければHFから取得 (Shrikeはネット接続可と想定)
@@ -81,7 +82,7 @@ ROLES = {
 NUM_ITERATIONS = 3 
 
 # --- Latent Space Construction Settings ---
-GAMES_PER_ITERATION_FOR_DATA = 10  # テスト実行用
+GAMES_PER_ITERATION_FOR_DATA = 50  # テスト実行用
 CANDIDATE_ACTIONS_PER_TURN = 3    # 高速化のため2推奨
 #INITIAL_K_WEREWOLF = 3 
 #INITIAL_K_VILLAGE = 2 

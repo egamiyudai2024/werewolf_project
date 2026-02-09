@@ -62,7 +62,7 @@ class WerewolfGame:
             self.intermediate_rewards[player.id] += 5
 
     def _process_voting(self, actions):
-        votes_by_player = {pid: act.get('vote') for pid, act in actions.items() if act and self.players[pid].is_alive}
+        votes_by_player = {pid: act.get('target') for pid, act in actions.items() if act and self.players[pid].is_alive}
         #生の投票データを保存
         self.last_voting_results = votes_by_player
         self.game_log.append({"type": "vote_summary", "round": self.round, "votes": votes_by_player})
@@ -240,9 +240,9 @@ class WerewolfGame:
         return {p.id: self.get_observation_for_player(p.id) for p in self.players}
 
     def _process_night_actions(self, actions):
-        werewolf_targets = [act['target'] for pid, act in actions.items() if act and self.players[pid].is_alive and self.players[pid].role == 'werewolf']
-        seer_target = next((act['target'] for pid, act in actions.items() if act and pid == self.seer_id and self.players[pid].is_alive), None)
-        doctor_target = next((act['target'] for pid, act in actions.items() if act and pid == self.doctor_id and self.players[pid].is_alive), None)
+        werewolf_targets = [act.get('target') for pid, act in actions.items() if act and self.players[pid].is_alive and self.players[pid].role == 'werewolf']
+        seer_target = next((act.get('target') for pid, act in actions.items() if act and pid == self.seer_id and self.players[pid].is_alive), None)
+        doctor_target = next((act.get('target') for pid, act in actions.items() if act and pid == self.doctor_id and self.players[pid].is_alive), None)
         
         # ⬇⬇⬇ 【追加】秘密行動の生データを保存 (自分の行動参照用) ⬇⬇⬇
         self.last_secret_actions = {}
